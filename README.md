@@ -85,6 +85,7 @@ The `novel` table tracks each novel and its processing state.
 | `general_channel_id`   | `string`                                 | Discord channel ID of the novel's `#general` channel (command routing) |
 | `overview_channel_id`  | `string`                                 | Discord channel ID of the novel's `#overview` channel |
 | `overview_message_id`  | `string`                                 | Discord message ID of the `#overview` status embed (workflow progress edits target this exact message) |
+| `last_error`           | `string` (nullable)                      | Last workflow error message for this novel, displayed in `#overview`; set when a workflow fails, cleared/overwritten on the next workflow run |
 
 Schema decisions:
 
@@ -222,7 +223,7 @@ Starts a Cloudflare Workflow that extracts notes (named entities such as charact
    1. Gets the raw chapter content from **R2** using the chapter's `r2_key`.
    2. Fetches the novel's notes from the **notes table**.
    3. Filters the notes to only those whose `source_names` appear in the raw chapter content (splitting `source_names` on `;` and matching each variation; keeps the entities relevant to this chapter, drops unused ones).
-   4. Passes the **whole notes object** together with the raw chapter content to the model with the notes extraction instructions (`src/instructions/notesInstructions.ts`).
+   4. Passes the **filtered notes object** (the note entries for the filtered names only, not all notes) together with the raw chapter content to the model with the notes extraction instructions (`src/instructions/notesInstructions.ts`).
    5. Applies the returned `notesChanges` diff to the **notes table** (updates / additions / deletions) — merging with existing entries, never blind-overwriting.
 3. Continues these steps for each chapter until all chapters have been processed.
 4. Updates the novel's `status` to `notes_extracted` once all chapters have been processed.
@@ -273,7 +274,7 @@ When a novel is created, the bot sets up a dedicated category for that novel:
 - **`#general`** — the primary command channel for the novel. All novel-specific commands (`/extract-chapters`, `/extract-notes`, `/translate-chapter`) are available here.
 - **`#overview`** — a read-only channel that displays the novel's details and current status using Discord message components.
 
-The Discord IDs for both channels (and the `#overview` status message) are stored on the `novel` row (`general_channel_id`, `overview_channel_id`, `overview_message_id`) — command routing and progress edits always target these exact stored IDs, never "find the newest message."
+The Discord IDs for both channels (and the `#overview` status message) are stored on the `novel` row (`general_channel_id`, `overview_channel_id`, `overview_message_id`) — command routing and progress edits always target these exact stored IDs, never "find the newest message." A novel command run outside its novel's `#general` channel replies with a helpful error naming the correct channel.
 
 ### Overview Message Layout
 
@@ -411,7 +412,7 @@ Sets up the single Hono Worker: `POST /interactions` webhook verified via Discor
 
 **Blocker:** 03
 
-`/extract-notes` defers, records an `extract_notes` workflow, and loops the chapters: filter saved notes to those whose `source_names` appear in the chapter text, feed the whole notes object plus the chapter to the model with `NOTES_INSTRUCTIONS`, and apply the returned `notesChanges` diff by merging (never blind-overwriting). Ends at `notes_extracted`. This is the first bullet needing an LLM, so it also establishes the provider-agnostic model client.
+`/extract-notes` defers, records an `extract_notes` workflow, and loops the chapters: filter saved notes to those whose `source_names` appear in the chapter text, feed the filtered notes object plus the chapter to the model with `NOTES_INSTRUCTIONS`, and apply the returned `notesChanges` diff by merging (never blind-overwriting). Ends at `notes_extracted`. This is the first bullet needing an LLM, so it also establishes the provider-agnostic model client.
 
 ### 05 — Translate chapter end-to-end
 
@@ -433,4 +434,17 @@ Record of decisions made while stress-testing this plan. Format: topic — decis
 
 ### Parked / Open
 
-- **Command registration scope** — global vs guild-scoped slash commands undecided.
+- **Translated files versioning** — re-translation overwrites the fixed `translated/<n>.md` key (no versioning). Parked idea: keep previous versions so a bad re-translation is recoverable (2026-09-24).
+
+### Follow-up review (2026-09-24)
+
+These amend the original plan. Format: topic — decision.
+
+- **Notes extraction scale** — assume a notes-extraction workflow completes within workflow duration limits; no chunking or resume pointer for now (2026-09-24).
+- **Notes filter semantics** — "whole notes object" in Notes Extraction and Tracer bullet 04 means the **note object for the filtered names only**, not all of a novel's notes (2026-09-24).
+- **Failed-workflow visibility** — the `#overview` embed displays the novel's last error, if any; stored on `novel.last_error` and set whenever a workflow fails (2026-09-24).
+- **`notesChanges` validation** — the model client is the AI SDK; returned `notesChanges` is validated against a Zod schema before any write. Invalid output fails the run — it is never merged best-effort or blindly trusted (2026-09-24).
+- **Command registration scope** — guild-scoped slash commands, registered to the single guild the bot serves, so definition updates propagate instantly (no global 1-hour sync) and `#general` routing is enforced. Implementation keeps an escape hatch: the registration script registers to `DISCORD_GUILD_ID` when set, otherwise falls back to global registration (2026-09-24).
+- **`/create-novel` permissions** — no admin gate: any member of the server can run it. No `default_member_permissions`; the only access control is channel routing on stored IDs (2026-09-24).
+- **Wrong-channel behavior** — a command run outside its intended channel (e.g. a novel command outside that novel's `#general`) replies with a helpful error naming the correct channel via its stored ID (2026-09-24).
+- **Unassigned chapter text** — proposed, awaiting decision: [your #5 pick].
