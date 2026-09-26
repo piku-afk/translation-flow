@@ -41,7 +41,7 @@ The Cloudflare Worker hosts the API and core translation logic. It is built with
 - **Novel table** - a database table tracking each novel and its metadata.
 - **Chapter table** - a database table tracking each extracted chapter belonging to a novel.
 - **Notes table** - a database table storing named entities (characters, places, misc) per novel, with source and English name mappings.
-- **Workflows table** - tracks every running/finished Cloudflare Workflow instance per novel and per chapter, so retries and `#overview` progress always have a durable record.
+- **Workflows table** - tracks every running/finished Cloudflare Workflow instance per novel and per chapter, so retries and overview progress always have a durable record.
 
 #### R2 folder structure
 
@@ -67,7 +67,7 @@ novel-name/
 
 Chapter files are zero-padded based on the total number of chapters for the novel: the chapter number padded to the width of `total_chapters`. For example, a novel with 100 chapters uses 3 digits (`001.txt`, `002.txt`, …, `100.txt`); a novel with 12 chapters uses 2 digits (`01.txt`, …, `12.txt`).
 
-> **Decided:** The user's declared `total_chapters` is only the *initial* expectation used for padding. If the extraction workflow discovers a different real count, it does **not** overwrite `total_chapters`; the `#overview` channel shows a **warning** with two options: **Retry extraction** (re-run with the declared count) or **Update total chapters** (write the discovered count into `novel.total_chapters` and re-run extraction so keys are re-written with the corrected padding). Existing chapter files are overwritten idempotently.
+> **Decided:** The user's declared `total_chapters` is only the *initial* expectation used for padding. If the extraction workflow discovers a different real count, it does **not** overwrite `total_chapters`. The overview embed shows an informational **warning** with the discovered count. Resolution is command-driven: re-running `/extract-chapters` retries extraction with the declared count; an explicit "adopt the discovered count" command is **parked**. Existing chapter files are overwritten idempotently.
 
 #### Novel schema
 
@@ -82,10 +82,9 @@ The `novel` table tracks each novel and its processing state.
 | `source_url`           | `string`                                 | Original URL where the novel lives on the web |
 | `total_chapters`       | `number`                                 | Total number of chapters in the novel |
 | `status`               | `enum (default: 'pending')`              | One of: `pending`, `chapters_extracted`, `notes_extracted`, `translation_started`, `translated` |
-| `general_channel_id`   | `string`                                 | Discord channel ID of the novel's `#general` channel (command routing) |
-| `overview_channel_id`  | `string`                                 | Discord channel ID of the novel's `#overview` channel |
-| `overview_message_id`  | `string`                                 | Discord message ID of the `#overview` status embed (workflow progress edits target this exact message) |
-| `last_error`           | `string` (nullable)                      | Last workflow error message for this novel, displayed in `#overview`; set when a workflow fails, cleared/overwritten on the next workflow run |
+| `channel_id`           | `string`                                 | Discord channel ID of the novel's channel (command routing) |
+| `overview_message_id`  | `string`                                 | Discord message ID of the pinned overview embed (workflow progress edits target this exact message) |
+| `last_error`           | `string` (nullable)                      | Last workflow error message for this novel, displayed in the overview embed; set when a workflow fails, cleared/overwritten on the next workflow run |
 
 Schema decisions:
 
@@ -120,7 +119,7 @@ The `chapter` table stores each extracted chapter of a novel, broken out from th
 | `r2_key`         | `string`                                 | Reference to the chapter file stored in R2 |
 | `is_translated`  | `boolean` (default: `false`)             | Whether the chapter has been translated |
 
-Translation progress for the `#overview` embed is derived from this table (`x / total` chapters translated). Per-chapter translation failures are recorded in the `workflows` table (see below), not in this table.
+Translation progress for the overview embed is derived from this table (`x / total` chapters translated). Per-chapter translation failures are recorded in the `workflows` table (see below), not in this table.
 
 #### Notes schema
 
@@ -162,7 +161,7 @@ Tracks every Cloudflare Workflow instance so progress can be rendered and so fai
 Decisions:
 
 - This table is the durable record of **all** workflow types: extraction workflows run once per novel, translation workflows run **per chapter** (one per call, several may be live at once).
-- Querying by `novel_id` (and optionally `chapter_id`) is how retries and the `#overview` progress embed find their workflows.
+- Querying by `novel_id` (and optionally `chapter_id`) is how retries and the overview progress embed find their workflows.
 - `started_at` / `finished_at` are cached from Workflows' `getInstanceStatus()` so rendering never requires a live API call.
 - **Duplicate-start race is accepted** — no pre-start guard against launching two extraction workflows for the same novel.
 - Failure semantics hang off this table: a chapter translation that exhausts its retries leaves a `failed` workflow row for that `chapter_id`, and the user re-runs via `/translate-chapter <n>`.
@@ -190,7 +189,7 @@ Creates a new novel from an uploaded raw file.
 1. Receives the novel metadata and the raw `.txt` file (all chapters combined into one file).
 2. Fetches the Discord attachment from its CDN URL and uploads the file to **R2** as `source/full.txt`.
 3. Creates a new entry in the **novel table** with the provided metadata and a reference to the uploaded file. The novel is created with `status` set to `pending`.
-4. On success the Discord handler builds the category/channels and posts the `#overview` embed (see Discord Bot section).
+4. On success the Discord handler builds the category/channel, posts the overview embed, and pins it (see Discord Bot section).
 
 > **Parked:** deleting the Discord CDN copy after a successful R2 upload. Currently the attachment stays on the CDN.
 
@@ -208,7 +207,7 @@ Starts a Cloudflare Workflow that breaks a novel's combined raw file into indivi
 4. Uploads each extracted chapter to **R2**.
 5. Creates a new entry in the **chapter table** for every extracted chapter (linked to the novel via `novel_id`).
 6. Updates the novel's `status` to `chapters_extracted` once all chapters have been extracted and uploaded.
-7. If the discovered chapter count differs from `total_chapters`, surface a warning in `#overview` with **Retry extraction** / **Update total chapters** options.
+7. If the discovered chapter count differs from `total_chapters`, add an informational warning line to the overview embed (see the total-chapters warning in the schema section).
 
 #### Start Notes Extraction
 
@@ -243,7 +242,7 @@ Starts a Cloudflare Workflow that translates a single chapter into English, usin
 5. Writes the translated text to **R2** in the novel's `translated/` folder as a `.md` file, matching the chapter's padded file name (e.g. `001.md`). Re-translating a chapter **overwrites** the fixed key (no versioning).
 6. Marks the chapter `is_translated = true`.
 7. Updates the novel's `status`: set `translation_started` when the first chapter finishes; set `translated` when `COUNT(is_translated = false) == 0`. Requires `status = notes_extracted` to run.
-8. Pushes a progress update to the stored `#overview` message (see Discord Bot).
+8. Pushes a progress update to the stored (pinned) overview message (see Discord Bot).
 
 **Resilience (decided):**
 
@@ -263,22 +262,21 @@ The Discord bot is the user-facing interface. Users interact with the app entire
 
 ### Channel Structure
 
-When a novel is created, the bot sets up a dedicated category for that novel:
+When a novel is created, the bot sets up a dedicated category with a **single channel** per novel:
 
 ```
 📁 <novel-name (kebab-case)>
-├── #general          — where users run commands for this novel
-└── #overview         — shows the novel's details and status
+└── #<novel-name>     — the novel's channel: commands run here, status lives here
 ```
 
-- **`#general`** — the primary command channel for the novel. All novel-specific commands (`/extract-chapters`, `/extract-notes`, `/translate-chapter`) are available here.
-- **`#overview`** — a read-only channel that displays the novel's details and current status using Discord message components.
+- The novel's channel is the **only** channel for that novel: all novel-specific commands (`/extract-chapters`, `/extract-notes`, `/translate-chapter`, `/status`) are available here, and the overview embed is pinned here.
+- There is **no separate `#overview` channel** (decided 2026-09-26). Status is a pinned message, not a second channel.
 
-The Discord IDs for both channels (and the `#overview` status message) are stored on the `novel` row (`general_channel_id`, `overview_channel_id`, `overview_message_id`) — command routing and progress edits always target these exact stored IDs, never "find the newest message." A novel command run outside its novel's `#general` channel replies with a helpful error naming the correct channel.
+The IDs (`channel_id`, `overview_message_id`) are stored on the `novel` row — command routing and progress edits always target these exact stored IDs, never "find the newest message." A novel command run outside its novel's channel replies with a helpful error naming the correct channel.
 
-### Overview Message Layout
+### Overview Message
 
-A single embed in `#overview` showing the novel's details and status:
+A single **embed — no message components** — posted once when the novel is created and **pinned** in the novel's channel, showing the novel's details and status:
 
 ```
 📖 My Great Novel
@@ -289,19 +287,15 @@ Status:     In Progress (translation)
 ━━━━━━━━━━━━━━━━━━━
 ```
 
-Action buttons below the embed:
-
-- Row 1: `[ Extract Chapters ]` `[ Extract Notes ]` — disabled once that stage is done
-- Row 2: `[ Translate Next Untranslated ]` — translates the lowest-numbered missing chapter
-- Row 3: `[ Re-extract Notes ]` — re-runs the notes workflow (merge semantics per `notesChanges`)
-
-There is **no Delete/Archive button** (archive flow is parked).
+- The embed is **display-only** — it has no message components (buttons). Every action is a slash command (2026-09-26).
+- `/status` re-renders this same overview from D1 on demand (see Commands below).
 
 ### Progress Updates (push, not poll)
 
-Long-running workflows update the `#overview` embed **by pushing from inside the workflow** — there is no persistent polling process in a Worker:
+Long-running workflows update the pinned overview embed **by pushing from inside the workflow** — there is no persistent polling process in a Worker:
 
-- The workflow step that completes (or reaches a progress point) calls the Discord REST API to edit the stored `overview_message_id`, authorized with the long-lived **bot token** (`Authorization: Bot <BOT_TOKEN>`), not the short-lived interaction webhook token.
+- The workflow step that completes (or reaches a progress point) calls the Discord REST API to edit the stored `overview_message_id` **in place** (the pinned message), authorized with the long-lived **bot token** (`Authorization: Bot <BOT_TOKEN>`), not the short-lived interaction webhook token.
+- Progress edits target the pinned overview message **only** — the workflow never posts new chat messages into the channel, so status and conversation stay separate by construction.
 - Progress counts are derived from D1 (`chapter.is_translated`) at each edit, so concurrent workflows can't corrupt the display.
 
 ### Interaction Handling
@@ -309,9 +303,9 @@ Long-running workflows update the `#overview` embed **by pushing from inside the
 Discord requires an initial response within **3 seconds** or the interaction token expires. Commands that kick off long workflows use Discord's **`DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE`** interaction response type:
 
 1. Receive the command.
-2. Respond immediately with "Working on it…".
+2. Respond immediately with a deferred "Working on it…" ack (ephemeral, so only the operator sees it).
 3. Start the Cloudflare Workflow and record it in the `workflows` table.
-4. The workflow pushes progress edits to `#overview` as it runs.
+4. The workflow pushes progress edits to the pinned overview message as it runs.
 
 ### Commands
 
@@ -334,11 +328,9 @@ Creates a new novel.
 
 3. On successful creation:
    - A new Discord **category** is created for the novel, named in `kebab-case` (e.g. `my-great-novel`).
-   - A `#general` channel is created inside that category.
-   - An `#overview` channel is created inside that category.
-   - The channel IDs are stored on the `novel` row.
-4. Inside the `#overview` channel, the bot posts a single **overview message** (embed + buttons, see above) and stores its `message_id` on the `novel` row.
-5. The user is navigated to the `#overview` channel.
+   - A single channel is created inside that category (the novel's `channel_id`).
+4. Inside the novel's channel, the bot posts the **overview embed** (see above), **pins** it, and stores `overview_message_id` on the `novel` row.
+5. The user is navigated to the novel's channel.
 
 **Collision handling:** if the generated `name` or `slug` already exists (unique constraints are enforced), creation is rejected with a message telling the user to pick a different name — no auto-suffix.
 
@@ -346,31 +338,31 @@ Creates a new novel.
 
 #### `/extract-chapters`
 
-Extracts chapters from the novel's combined raw file. Available in the novel's `#general` channel.
+Extracts chapters from the novel's combined raw file. Available in the novel's channel.
 
 **Flow**
 
-1. The user runs `/extract-chapters` in the novel's `#general` channel.
+1. The user runs `/extract-chapters` in the novel's channel.
 2. The handler defers the response, starts the `extract_chapters` workflow, and records it in the `workflows` table.
-3. The workflow pushes progress to the `#overview` embed; if the discovered chapter count differs from `total_chapters`, a warning with **Retry extraction** / **Update total chapters** appears there.
+3. The workflow pushes progress to the pinned overview embed; if the discovered chapter count differs from `total_chapters`, an informational warning is added there (retry by re-running this command; adopting the count is parked).
 
 ---
 
 #### `/extract-notes`
 
-Extracts named entities (characters, places, misc terms) from all chapters of the novel. Available in the novel's `#general` channel.
+Extracts named entities (characters, places, misc terms) from all chapters of the novel. Available in the novel's channel.
 
 **Flow**
 
-1. The user runs `/extract-notes` in the novel's `#general` channel.
+1. The user runs `/extract-notes` in the novel's channel.
 2. The handler defers the response, starts the `extract_notes` workflow, and records it in the `workflows` table.
-3. The workflow pushes progress to the `#overview` embed and confirms once notes have been extracted and saved (applied as `notesChanges` diffs).
+3. The workflow pushes progress to the pinned overview embed and confirms once notes have been extracted and saved (applied as `notesChanges` diffs).
 
 ---
 
 #### `/translate-chapter <chapter-number>`
 
-Translates a single chapter into English using the novel's extracted notes. Available in the novel's `#general` channel.
+Translates a single chapter into English using the novel's extracted notes. Available in the novel's channel.
 
 **Parameters**
 
@@ -380,9 +372,21 @@ Translates a single chapter into English using the novel's extracted notes. Avai
 
 **Flow**
 
-1. The user runs `/translate-chapter 1` (or any chapter number) in the novel's `#general` channel.
+1. The user runs `/translate-chapter 1` (or any chapter number) in the novel's channel.
 2. The handler defers the response, starts the `translate_chapter` workflow for the corresponding chapter, and records it in the `workflows` table.
-3. The translated chapter is stored in R2 as a `.md` file in the novel's `translated/` folder, the chapter is marked translated, and the `#overview` progress embed is updated.
+3. The translated chapter is stored in R2 as a `.md` file in the novel's `translated/` folder, the chapter is marked translated, and the pinned overview embed is updated.
+
+---
+
+#### `/status`
+
+Shows the current overview for the novel. Available in the novel's channel.
+
+**Flow**
+
+1. The user runs `/status` in the novel's channel.
+2. The handler re-renders the overview embed from D1 (no workflow, no live API calls — counts come from `chapter.is_translated`, status from `novel.status`).
+3. It replies **ephemerally** with the overview. If the pinned overview message was deleted or lost, `/status` re-posts and re-pins it, restoring the stored `overview_message_id` — this is the recovery path for the pinned status.
 
 ---
 
@@ -400,13 +404,13 @@ Sets up the single Hono Worker: `POST /interactions` webhook verified via Discor
 
 **Blocker:** 01
 
-`/create-novel` opens a modal (name, source language, total chapters, source URL, raw `.txt` attachment). On success the raw file lands in R2, the `novel` row is written as `pending` with slug and channel IDs, the Discord category + `#general` + `#overview` are created, the overview embed is posted with its message id stored, and the user is navigated to `#overview`. Name/slug collisions reject the creation.
+`/create-novel` opens a modal (name, source language, total chapters, source URL, raw `.txt` attachment). On success the raw file lands in R2, the `novel` row is written as `pending` with slug and channel IDs, the Discord category + single novel channel are created, the overview embed is posted and pinned with its message id stored, and the user is navigated to the novel's channel. Name/slug collisions reject the creation.
 
 ### 03 — Extract chapters end-to-end
 
 **Blocker:** 02
 
-`/extract-chapters` defers, records an `extract_chapters` workflow, parses chapter headings from the source URL, splits the combined raw file into zero-padded chapter files in R2, creates `chapter` rows, and moves the novel to `chapters_extracted` while pushing progress to `#overview`. A discovered count that differs from `total_chapters` surfaces a warning with retry / update-total options.
+`/extract-chapters` defers, records an `extract_chapters` workflow, parses chapter headings from the source URL, splits the combined raw file into zero-padded chapter files in R2, creates `chapter` rows, and moves the novel to `chapters_extracted` while pushing progress to the pinned overview message. A discovered count that differs from `total_chapters` surfaces an informational warning there (retry by re-running the command; adopting the count is parked).
 
 ### 04 — Extract notes end-to-end
 
@@ -418,13 +422,13 @@ Sets up the single Hono Worker: `POST /interactions` webhook verified via Discor
 
 **Blocker:** 04
 
-`/translate-chapter <n>` (guarded by `status = notes_extracted`) defers, records a `translate_chapter` workflow, filters the novel's notes against the chapter text, translates with `TRANSLATION_INSTRUCTIONS`, writes the result to the novel's `translated/` folder (fixed key, overwrites on re-run), marks the chapter translated, advances the novel status (`translation_started` → `translated` when none remain), and pushes progress. Per-chapter retries with backoff; a final failure leaves a `failed` workflow row so the user re-runs via the command.
+`/translate-chapter <n>` (guarded by `status = notes_extracted`) defers, records a `translate_chapter` workflow, filters the novel's notes against the chapter text, translates with `TRANSLATION_INSTRUCTIONS`, writes the result to the novel's `translated/` folder (fixed key, overwrites on re-run), marks the chapter translated, advances the novel status (`translation_started` → `translated` when none remain), and pushes progress to the pinned overview message. Per-chapter retries with backoff; a final failure leaves a `failed` workflow row so the user re-runs via the command.
 
-### 06 — Overview message components
+### 06 — `/status` command
 
-**Blocker:** 05
+**Blocker:** 02
 
-The `#overview` buttons come alive: Extract Chapters / Extract Notes (disabled once done), Translate Next Untranslated (lowest missing chapter), Re-extract Notes (merge semantics), and the count-mismatch Retry / Update Total Chapters actions from 03. Each click completes the same deferred-response → workflow → progress-push path as the slash commands.
+`/status` re-renders the novel's overview from D1 as an ephemeral reply — no workflow, no live API calls. If the pinned overview message is missing, it re-posts and re-pins it, restoring `overview_message_id`. This closes the loop for the pinned-status model: the pinned embed stays canonical, and `/status` is the recovery path.
 
 ---
 
@@ -440,11 +444,20 @@ Record of decisions made while stress-testing this plan. Format: topic — decis
 
 These amend the original plan. Format: topic — decision.
 
-- **Notes extraction scale** — assume a notes-extraction workflow completes within workflow duration limits; no chunking or resume pointer for now (2026-09-24).
+- **Notes extraction scale** — assume a notes-extraction workflow completes within workflow duration limits; no chunking or resume pointer (2026-09-24).
 - **Notes filter semantics** — "whole notes object" in Notes Extraction and Tracer bullet 04 means the **note object for the filtered names only**, not all of a novel's notes (2026-09-24).
-- **Failed-workflow visibility** — the `#overview` embed displays the novel's last error, if any; stored on `novel.last_error` and set whenever a workflow fails (2026-09-24).
-- **`notesChanges` validation** — the model client is the AI SDK; returned `notesChanges` is validated against a Zod schema before any write. Invalid output fails the run — it is never merged best-effort or blindly trusted (2026-09-24).
-- **Command registration scope** — guild-scoped slash commands, registered to the single guild the bot serves, so definition updates propagate instantly (no global 1-hour sync) and `#general` routing is enforced. Implementation keeps an escape hatch: the registration script registers to `DISCORD_GUILD_ID` when set, otherwise falls back to global registration (2026-09-24).
+- **Failed-workflow visibility** — the pinned overview embed displays the novel's last error, if any; stored on `novel.last_error` and set whenever a workflow fails (2026-09-24).
+- **`notesChanges` validation** — the model client is the AI SDK; returned `notesChanges` is validated against a Zod schema on every write. Invalid output fails the run — it is never merged best-effort or blindly trusted (2026-09-24).
+- **Command registration scope** — guild-scoped slash commands, registered to the single guild the bot serves, so definition updates propagate instantly (no global 1-hour sync) and per-novel channel routing is enforced. Implementation keeps an escape hatch: the registration script registers to `DISCORD_GUILD_ID` when set, otherwise falls back to global registration (2026-09-24).
 - **`/create-novel` permissions** — no admin gate: any member of the server can run it. No `default_member_permissions`; the only access control is channel routing on stored IDs (2026-09-24).
-- **Wrong-channel behavior** — a command run outside its intended channel (e.g. a novel command outside that novel's `#general`) replies with a helpful error naming the correct channel via its stored ID (2026-09-24).
+- **Wrong-channel behavior** — a command run outside its intended channel (e.g. a novel command outside that novel's channel) replies with a helpful error naming the correct channel via its stored ID (2026-09-24).
 - **Unassigned chapter text** — proposed, awaiting decision: [your #5 pick].
+
+### Follow-up review (2026-09-26)
+
+- **One channel per novel** — a novel gets a dedicated category with a single channel. The overview embed is posted once, pinned, and edited in place. The novel row stores `channel_id` for command routing and `overview_message_id` for the pinned embed (2026-09-26).
+- **No message components** — the overview is an embed-only, display-only message; it has no buttons. All actions are slash commands (2026-09-26).
+- **`/status` command** — re-renders the overview from D1 as an ephemeral reply; re-posts/re-pins the overview message if deleted. Recovery path for pinned status (2026-09-26).
+- **Progress edits are pinned-message-only** — workflows never post new chat messages into the channel; status and conversation stay separate by construction (2026-09-26).
+- **Count-mismatch warning is informational** — the overview embed shows the discovered count; resolution is re-run `/extract-chapters` (retry with declared count). An explicit "adopt discovered count" command is parked (2026-09-26).
+- **Command roadmap** — `/notes` (view/correct extracted entities) and a way to read a translated chapter in Discord are planned (2026-09-26).
