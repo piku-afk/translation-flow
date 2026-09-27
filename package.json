@@ -1,0 +1,42 @@
+{
+  "name": "translation-flow",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Translate novels from Chinese and Korean into English via a Cloudflare Worker API and Discord bot interface.",
+  "type": "module",
+  "main": "src/index.ts",
+  "author": "Piyush Mahato",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "wrangler deploy --dry-run",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types",
+    "typecheck": "tsc --noEmit",
+    "spell": "cspell lint src/**/*",
+    "test": "vitest run ping",
+    "check": "pnpm spell && pnpm typecheck",
+    "register-commands": "node --env-file-if-exists=.env scripts/register-commands.ts"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "12.6.0",
+      "onFail": "download"
+    }
+  },
+  "dependencies": {
+    "@discordjs/formatters": "^0.6.2",
+    "@discordjs/rest": "^2.6.3",
+    "discord-api-types": "^0.38.55",
+    "hono": "^4.13.9",
+    "tweetnacl": "^1.0.3"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.2.7",
+    "@types/node": "^24.19.0",
+    "cspell": "^10.3.4",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.141.0"
+  }
+}

@@ -1,7 +1,5 @@
 import { TRUST_BOUNDARY_INSTRUCTIONS } from "./commonInstructions.ts";
 
-const translationOutput = ``;
-
 export const TRANSLATION_INSTRUCTIONS = `
 # Novel Translation & Formatting Instructions
 

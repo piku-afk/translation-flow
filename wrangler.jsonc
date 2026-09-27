@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "translation-flow",
+  "compatibility_date": "2026-09-26",
+  "compatibility_flags": ["nodejs_compat_v2"],
+  "main": "src/index.ts",
+  "secrets": { "required": ["DISCORD_BOT_TOKEN"] },
+  "vars": {
+    "DISCORD_APP_ID": "1553351767813529730",
+    "DISCORD_GUILD_ID": "1553353381035249787",
+    "DISCORD_PUBLIC_KEY": "c116ab349e76dd838c0e8284f48c7732b185e424a68bfca2f27deb4a0033cda6",
+  },
+}
