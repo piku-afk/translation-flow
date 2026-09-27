@@ -19,6 +19,8 @@ flowchart LR
 >
 > There is **no public `/api` HTTP surface** and **no shared-secret auth** — the only external entry point is the Discord signature. If a third-party API consumer ever appears, extract the internal handlers into a second Worker behind a Cloudflare **Service Binding** (auth-free) at that point.
 
+> **Implementation status:** Tracer bullet **[01 — Discord interaction foundation](#01--discord-interaction-foundation)** is implemented. Live surface right now: a single Hono Worker at `POST /interactions` (Discord Ed25519-verified, with a 30-second timestamp replay guard), guild-scoped slash-command registration, and the immediate-response `/ping` health command that checks D1 + R2. Everything else in this README (novel/chapter/notes flows, Cloudflare Workflows, `/create-novel` and friends) is **planned** — tracked as the remaining tracer bullets below.
+
 ---
 
 ## Overview
@@ -270,7 +272,7 @@ When a novel is created, the bot sets up a dedicated category with a **single ch
 ```
 
 - The novel's channel is the **only** channel for that novel: all novel-specific commands (`/extract-chapters`, `/extract-notes`, `/translate-chapter`, `/status`) are available here, and the overview embed is pinned here.
-- There is **no separate `#overview` channel** (decided 2026-09-26). Status is a pinned message, not a second channel.
+- There is **no separate `#overview` channel** (decided). Status is a pinned message, not a second channel.
 
 The IDs (`channel_id`, `overview_message_id`) are stored on the `novel` row — command routing and progress edits always target these exact stored IDs, never "find the newest message." A novel command run outside its novel's channel replies with a helpful error naming the correct channel.
 
@@ -287,7 +289,7 @@ Status:     In Progress (translation)
 ━━━━━━━━━━━━━━━━━━━
 ```
 
-- The embed is **display-only** — it has no message components (buttons). Every action is a slash command (2026-09-26).
+- The embed is **display-only** — it has no message components (buttons). Every action is a slash command.
 - `/status` re-renders this same overview from D1 on demand (see Commands below).
 
 ### Progress Updates (push, not poll)
@@ -307,7 +309,19 @@ Discord requires an initial response within **3 seconds** or the interaction tok
 3. Start the Cloudflare Workflow and record it in the `workflows` table.
 4. The workflow pushes progress edits to the pinned overview message as it runs.
 
+> **Scene check (bullet 01):** only the **immediate** response path is live today — `/ping` replies inline without deferral. The deferred pattern above ships with bullet 02 (`/create-novel`).
+
 ### Commands
+
+Only `/ping` is implemented so far (tracer bullet 01). The commands below it are the **planned** surface for bullets 02–06.
+
+#### `/ping`
+
+Checks server health. Replies immediately — no workflow, no deferral — well within Discord's 3-second window, with a components v2 embed showing overall status, D1 (`SELECT 1`) and R2 (`list`) health, and a "Last checked" timestamp.
+
+**Status: implemented.**
+
+---
 
 #### `/create-novel`
 
@@ -390,6 +404,22 @@ Shows the current overview for the novel. Available in the novel's channel.
 
 ---
 
+## Development
+
+Project plumbing (worker config, D1/R2 bindings, scripts) landed with tracer bullet 01.
+
+- `pnpm install` — install dependencies (pnpm workspace, single package).
+- `pnpm dev` — local Wrangler dev server.
+- `pnpm test` — Vitest suite (signature gate, interaction dispatch, health checks).
+- `pnpm check` — the style gate: `cspell` + `tsc --noEmit`.
+- `pnpm register-commands` — (re)register slash commands to the guild in `DISCORD_GUILD_ID`. Requires `DISCORD_APP_ID`, `DISCORD_GUILD_ID`, `DISCORD_BOT_TOKEN` (env vars or `.env`).
+- `pnpm types` — regenerate `worker-configuration.d.ts` from `wrangler.jsonc`.
+- `pnpm deploy` — deploy the Worker.
+
+Bindings (`wrangler.jsonc`): `DB` (D1) and `NOVELS_BUCKET` (R2) are wired with `remote: true`; `DISCORD_PUBLIC_KEY` and the app/guild IDs live in `vars`, and `DISCORD_BOT_TOKEN` is declared as a required secret.
+
+---
+
 ## Tracer Bullets
 
 The build plan is a set of **tracer-bullet tickets**: each cuts a narrow but complete vertical path (schema, storage, workflow, Discord UI, tests), is demoable on its own, and depends only on the bullets listed as blockers. Numbered in dependency order; work them front to back.
@@ -400,9 +430,13 @@ The build plan is a set of **tracer-bullet tickets**: each cuts a narrow but com
 
 Sets up the single Hono Worker: `POST /interactions` webhook verified via Discord public-key signature, slash-command registration, an immediate (non-deferred) response path, and the project plumbing (worker config, D1/R2 bindings, CI). Everything else hangs off this bullet. A command produces a reply within the 3-second window.
 
+**Status: implemented.** Live surface: `POST /interactions` Ed25519-verified with a 30-second timestamp replay guard, guild-scoped command registration (`scripts/register-commands.ts`), the immediate-response `/ping` health command (D1 + R2 health embed), wrangler config with `DB` / `NOVELS_BUCKET` bindings, and the verify scripts (`pnpm test`, `pnpm check`, `pnpm register-commands`). 25 tests pass. **Gap vs the bullet spec:** CI is listed in the bullet but not set up yet — no workflow file in the repo.
+
 ### 02 — Create novel end-to-end
 
 **Blocker:** 01
+
+**Status:** planned.
 
 `/create-novel` opens a modal (name, source language, total chapters, source URL, raw `.txt` attachment). On success the raw file lands in R2, the `novel` row is written as `pending` with slug and channel IDs, the Discord category + single novel channel are created, the overview embed is posted and pinned with its message id stored, and the user is navigated to the novel's channel. Name/slug collisions reject the creation.
 
@@ -410,11 +444,15 @@ Sets up the single Hono Worker: `POST /interactions` webhook verified via Discor
 
 **Blocker:** 02
 
+**Status:** planned.
+
 `/extract-chapters` defers, records an `extract_chapters` workflow, parses chapter headings from the source URL, splits the combined raw file into zero-padded chapter files in R2, creates `chapter` rows, and moves the novel to `chapters_extracted` while pushing progress to the pinned overview message. A discovered count that differs from `total_chapters` surfaces an informational warning there (retry by re-running the command; adopting the count is parked).
 
 ### 04 — Extract notes end-to-end
 
 **Blocker:** 03
+
+**Status:** planned.
 
 `/extract-notes` defers, records an `extract_notes` workflow, and loops the chapters: filter saved notes to those whose `source_names` appear in the chapter text, feed the filtered notes object plus the chapter to the model with `NOTES_INSTRUCTIONS`, and apply the returned `notesChanges` diff by merging (never blind-overwriting). Ends at `notes_extracted`. This is the first bullet needing an LLM, so it also establishes the provider-agnostic model client.
 
@@ -422,42 +460,46 @@ Sets up the single Hono Worker: `POST /interactions` webhook verified via Discor
 
 **Blocker:** 04
 
+**Status:** planned.
+
 `/translate-chapter <n>` (guarded by `status = notes_extracted`) defers, records a `translate_chapter` workflow, filters the novel's notes against the chapter text, translates with `TRANSLATION_INSTRUCTIONS`, writes the result to the novel's `translated/` folder (fixed key, overwrites on re-run), marks the chapter translated, advances the novel status (`translation_started` → `translated` when none remain), and pushes progress to the pinned overview message. Per-chapter retries with backoff; a final failure leaves a `failed` workflow row so the user re-runs via the command.
 
 ### 06 — `/status` command
 
 **Blocker:** 02
 
+**Status:** planned.
+
 `/status` re-renders the novel's overview from D1 as an ephemeral reply — no workflow, no live API calls. If the pinned overview message is missing, it re-posts and re-pins it, restoring `overview_message_id`. This closes the loop for the pinned-status model: the pinned embed stays canonical, and `/status` is the recovery path.
 
 ---
 
-## Decisions Log (planning session, 2026-09-23)
+## Decisions Log
 
 Record of decisions made while stress-testing this plan. Format: topic — decision.
 
 ### Parked / Open
 
-- **Translated files versioning** — re-translation overwrites the fixed `translated/<n>.md` key (no versioning). Parked idea: keep previous versions so a bad re-translation is recoverable (2026-09-24).
+- **Translated files versioning** — re-translation overwrites the fixed `translated/<n>.md` key (no versioning). Parked idea: keep previous versions so a bad re-translation is recoverable.
 
-### Follow-up review (2026-09-24)
+### Follow-up review — extraction & command scope
 
 These amend the original plan. Format: topic — decision.
 
-- **Notes extraction scale** — assume a notes-extraction workflow completes within workflow duration limits; no chunking or resume pointer (2026-09-24).
-- **Notes filter semantics** — "whole notes object" in Notes Extraction and Tracer bullet 04 means the **note object for the filtered names only**, not all of a novel's notes (2026-09-24).
-- **Failed-workflow visibility** — the pinned overview embed displays the novel's last error, if any; stored on `novel.last_error` and set whenever a workflow fails (2026-09-24).
-- **`notesChanges` validation** — the model client is the AI SDK; returned `notesChanges` is validated against a Zod schema on every write. Invalid output fails the run — it is never merged best-effort or blindly trusted (2026-09-24).
-- **Command registration scope** — guild-scoped slash commands, registered to the single guild the bot serves, so definition updates propagate instantly (no global 1-hour sync) and per-novel channel routing is enforced. Implementation keeps an escape hatch: the registration script registers to `DISCORD_GUILD_ID` when set, otherwise falls back to global registration (2026-09-24).
-- **`/create-novel` permissions** — no admin gate: any member of the server can run it. No `default_member_permissions`; the only access control is channel routing on stored IDs (2026-09-24).
-- **Wrong-channel behavior** — a command run outside its intended channel (e.g. a novel command outside that novel's channel) replies with a helpful error naming the correct channel via its stored ID (2026-09-24).
+- **Notes extraction scale** — assume a notes-extraction workflow completes within workflow duration limits; no chunking or resume pointer.
+- **Notes filter semantics** — "whole notes object" in Notes Extraction and Tracer bullet 04 means the **note object for the filtered names only**, not all of a novel's notes.
+- **Failed-workflow visibility** — the pinned overview embed displays the novel's last error, if any; stored on `novel.last_error` and set whenever a workflow fails.
+- **`notesChanges` validation** — the model client is the AI SDK; returned `notesChanges` is validated against a Zod schema on every write. Invalid output fails the run — it is never merged best-effort or blindly trusted.
+- **Command registration scope** — guild-scoped slash commands, registered to the single guild the bot serves, so definition updates propagate instantly (no global 1-hour sync) and per-novel channel routing is enforced. The registration script (`scripts/register-commands.ts`) registers to `DISCORD_GUILD_ID` only and requires it; the earlier idea of a global-registration fallback is **not implemented** (parked).
+- **`/create-novel` permissions** — no admin gate: any member of the server can run it. No `default_member_permissions`; the only access control is channel routing on stored IDs.
+- **Wrong-channel behavior** — a command run outside its intended channel (e.g. a novel command outside that novel's channel) replies with a helpful error naming the correct channel via its stored ID.
 - **Unassigned chapter text** — proposed, awaiting decision: [your #5 pick].
 
-### Follow-up review (2026-09-26)
+### Follow-up review — channel & status model
 
-- **One channel per novel** — a novel gets a dedicated category with a single channel. The overview embed is posted once, pinned, and edited in place. The novel row stores `channel_id` for command routing and `overview_message_id` for the pinned embed (2026-09-26).
-- **No message components** — the overview is an embed-only, display-only message; it has no buttons. All actions are slash commands (2026-09-26).
-- **`/status` command** — re-renders the overview from D1 as an ephemeral reply; re-posts/re-pins the overview message if deleted. Recovery path for pinned status (2026-09-26).
-- **Progress edits are pinned-message-only** — workflows never post new chat messages into the channel; status and conversation stay separate by construction (2026-09-26).
-- **Count-mismatch warning is informational** — the overview embed shows the discovered count; resolution is re-run `/extract-chapters` (retry with declared count). An explicit "adopt discovered count" command is parked (2026-09-26).
-- **Command roadmap** — `/notes` (view/correct extracted entities) and a way to read a translated chapter in Discord are planned (2026-09-26).
+- **One channel per novel** — a novel gets a dedicated category with a single channel. The overview embed is posted once, pinned, and edited in place. The novel row stores `channel_id` for command routing and `overview_message_id` for the pinned embed.
+- **No message components** — the overview is an embed-only, display-only message; it has no buttons. All actions are slash commands.
+- **`/status` command** — re-renders the overview from D1 as an ephemeral reply; re-posts/re-pins the overview message if deleted. Recovery path for pinned status.
+- **Progress edits are pinned-message-only** — workflows never post new chat messages into the channel; status and conversation stay separate by construction.
+- **Count-mismatch warning is informational** — the overview embed shows the discovered count; resolution is re-run `/extract-chapters` (retry with declared count). An explicit "adopt discovered count" command is parked.
+- **Command roadmap** — `/notes` (view/correct extracted entities) and a way to read a translated chapter in Discord are planned.

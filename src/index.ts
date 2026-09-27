@@ -1,11 +1,8 @@
 import { Hono } from "hono";
-import { env } from "cloudflare:workers";
 
 import { verifyInteraction } from "./discord/verify.ts";
 import { handleInteraction } from "./interactions.ts";
 import type { APIInteraction } from "discord-api-types/v10";
-
-type Bindings = typeof env;
 
 /**
  * reject interactions whose timestamp is too far from the current time to
@@ -13,7 +10,7 @@ type Bindings = typeof env;
  */
 const MAX_TIMESTAMP_AGE_SECONDS = 30;
 
-const app = new Hono<{ Bindings: Bindings }>();
+const app = new Hono<{ Bindings: Env }>();
 export default app;
 
 app.post("/interactions", async (c) => {
@@ -50,7 +47,7 @@ app.post("/interactions", async (c) => {
     return c.text("Invalid JSON", 400);
   }
 
-  const response = handleInteraction(interaction);
+  const response = await handleInteraction(interaction, c.env);
   if (!response) {
     return c.text("Unsupported interaction type", 400);
   }

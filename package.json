@@ -13,7 +13,7 @@
     "types": "wrangler types",
     "typecheck": "tsc --noEmit",
     "spell": "cspell lint src/**/*",
-    "test": "vitest run ping",
+    "test": "vitest run",
     "check": "pnpm spell && pnpm typecheck",
     "register-commands": "node --env-file-if-exists=.env scripts/register-commands.ts"
   },
@@ -28,6 +28,7 @@
     "@discordjs/formatters": "^0.6.2",
     "@discordjs/rest": "^2.6.3",
     "discord-api-types": "^0.38.55",
+    "drizzle-orm": "^0.45.3",
     "hono": "^4.13.9",
     "tweetnacl": "^1.0.3"
   },
@@ -35,6 +36,7 @@
     "@cloudflare/vitest-plugin": "^1.2.7",
     "@types/node": "^24.19.0",
     "cspell": "^10.3.4",
+    "drizzle-kit": "^0.31.11",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11",
     "wrangler": "^4.141.0"

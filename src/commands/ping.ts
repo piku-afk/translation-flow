@@ -18,15 +18,15 @@ export const pingCommand = {
   description: "Checks server health.",
 } as const satisfies RESTPostAPIApplicationCommandsJSONBody;
 
-type ServiceHealth = "ok" | "degraded" | "down" | "unchecked";
+type ServiceHealth = "ok" | "down";
 
 type HealthReport = {
-  status: "ok" | "degraded" | "down";
+  status: "ok" | "down";
   timestamp: string;
   worker: string;
   services: {
-    d1: ServiceHealth;
-    r2: ServiceHealth;
+    database: ServiceHealth;
+    storage: ServiceHealth;
   };
 };
 
@@ -35,17 +35,61 @@ type HealthEmbed = {
   components: APIContainerComponent[];
 };
 
-export function buildHealthReport(now: Date = new Date()): HealthReport {
+type HealthBindings = {
+  DB: D1Database;
+  NOVELS_BUCKET: R2Bucket;
+};
+
+async function checkDatabase(db: D1Database): Promise<ServiceHealth> {
+  try {
+    await db.prepare("SELECT 1").first();
+    return "ok";
+  } catch {
+    return "down";
+  }
+}
+
+async function checkStorage(bucket: R2Bucket): Promise<ServiceHealth> {
+  try {
+    await bucket.list({ limit: 1 });
+    return "ok";
+  } catch {
+    return "down";
+  }
+}
+
+function overallStatus(services: HealthReport["services"]): HealthReport["status"] {
+  const states = Object.values(services);
+  if (states.includes("down")) {
+    return "down";
+  }
+
+  return "ok";
+}
+
+export async function buildHealthReport(
+  bindings: HealthBindings,
+  now: Date = new Date(),
+): Promise<HealthReport> {
+  const [database, storage] = await Promise.all([
+    checkDatabase(bindings.DB),
+    checkStorage(bindings.NOVELS_BUCKET),
+  ]);
+
+  const services = { database, storage };
+
   return {
-    status: "ok",
+    status: overallStatus(services),
     timestamp: now.toISOString(),
     worker: "translation-flow",
-    services: {
-      d1: "unchecked",
-      r2: "unchecked",
-    },
+    services,
   };
 }
+
+const HEALTH_LABELS: Record<ServiceHealth, string> = {
+  ok: "Ok",
+  down: "Down",
+};
 
 export function buildHealthEmbed(report: HealthReport): HealthEmbed {
   const container: APIContainerComponent = {
@@ -55,9 +99,18 @@ export function buildHealthEmbed(report: HealthReport): HealthEmbed {
     components: [
       { type: ComponentType.TextDisplay, content: heading("Translator Api Health", 2) },
       { type: ComponentType.Separator, divider: true, spacing: SeparatorSpacingSize.Small },
-      { type: ComponentType.TextDisplay, content: `${bold("Status:")} Healthy` },
-      { type: ComponentType.TextDisplay, content: `${bold("Database:")} Unchecked` },
-      { type: ComponentType.TextDisplay, content: `${bold("Storage:")} Unchecked` },
+      {
+        type: ComponentType.TextDisplay,
+        content: `${bold("Status:")} ${HEALTH_LABELS[report.status]}`,
+      },
+      {
+        type: ComponentType.TextDisplay,
+        content: `${bold("Database:")} ${HEALTH_LABELS[report.services.database]}`,
+      },
+      {
+        type: ComponentType.TextDisplay,
+        content: `${bold("Storage:")} ${HEALTH_LABELS[report.services.storage]}`,
+      },
       { type: ComponentType.Separator, divider: true, spacing: SeparatorSpacingSize.Small },
       {
         type: ComponentType.TextDisplay,
@@ -72,8 +125,11 @@ export function buildHealthEmbed(report: HealthReport): HealthEmbed {
   };
 }
 
-export function handlePing(now: Date = new Date()): APIInteractionResponseChannelMessageWithSource {
-  const { flags, components } = buildHealthEmbed(buildHealthReport(now));
+export async function handlePing(
+  bindings: HealthBindings,
+  now: Date = new Date(),
+): Promise<APIInteractionResponseChannelMessageWithSource> {
+  const { flags, components } = buildHealthEmbed(await buildHealthReport(bindings, now));
 
   return {
     type: InteractionResponseType.ChannelMessageWithSource,

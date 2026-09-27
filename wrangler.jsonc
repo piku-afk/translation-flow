@@ -10,4 +10,19 @@
     "DISCORD_GUILD_ID": "1553353381035249787",
     "DISCORD_PUBLIC_KEY": "c116ab349e76dd838c0e8284f48c7732b185e424a68bfca2f27deb4a0033cda6",
   },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_id": "071de44c-95f2-4e89-8163-6d9c09b9637e",
+      "database_name": "translation-flow",
+      "remote": true,
+    },
+  ],
+  "r2_buckets": [
+    {
+      "binding": "NOVELS_BUCKET",
+      "bucket_name": "translation-flow-novels",
+      "remote": true,
+    },
+  ],
 }

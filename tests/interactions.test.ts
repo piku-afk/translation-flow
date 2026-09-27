@@ -1,9 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import app from "../src/index";
 import { signRequest, TEST_PUBLIC_KEY } from "./helpers";
 
-const ENV = { DISCORD_PUBLIC_KEY: TEST_PUBLIC_KEY };
+const ENV = {
+  DISCORD_PUBLIC_KEY: TEST_PUBLIC_KEY,
+  DB: {
+    prepare: vi.fn().mockReturnValue({ first: vi.fn().mockResolvedValue({}) }),
+  } as unknown as D1Database,
+  NOVELS_BUCKET: {
+    list: vi.fn().mockResolvedValue({ objects: [], truncated: false }),
+  } as unknown as R2Bucket,
+};
 
 async function postInteractions(body: string, headers: Record<string, string> = {}) {
   return app.request(
@@ -65,7 +73,7 @@ describe("POST /interactions (command dispatch)", () => {
     expect(container?.type).toBe(17);
     const texts = container?.components ?? [];
     expect(texts[0]).toEqual({ type: 10, content: "## Translator Api Health" });
-    expect(texts[2]).toEqual({ type: 10, content: "**Status:** Healthy" });
+    expect(texts[2]).toEqual({ type: 10, content: "**Status:** Ok" });
     expect(texts[6].content).toMatch(/^Last checked: .+ UTC$/);
   });
 
